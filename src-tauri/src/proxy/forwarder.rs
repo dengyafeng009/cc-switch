@@ -954,9 +954,17 @@ impl RequestForwarder {
         } else {
             None
         };
+        let resolved_codex_api_format = if adapter.name() == "Codex" {
+            Some(super::providers::get_codex_api_format(provider))
+        } else {
+            None
+        };
         let needs_transform = match resolved_claude_api_format.as_deref() {
             Some(api_format) => super::providers::claude_api_format_needs_transform(api_format),
-            None => adapter.needs_transform(provider),
+            None => match resolved_codex_api_format.as_deref() {
+                Some(api_format) => super::providers::codex_api_format_needs_transform(api_format),
+                None => adapter.needs_transform(provider),
+            },
         };
         let (effective_endpoint, passthrough_query) =
             if needs_transform && adapter.name() == "Claude" {
@@ -964,6 +972,11 @@ impl RequestForwarder {
                     .as_deref()
                     .unwrap_or_else(|| super::providers::get_claude_api_format(provider));
                 rewrite_claude_transform_endpoint(endpoint, api_format, is_copilot, &mapped_body)
+            } else if needs_transform && adapter.name() == "Codex" {
+                let api_format = resolved_codex_api_format
+                    .as_deref()
+                    .unwrap_or("passthrough");
+                rewrite_codex_transform_endpoint(endpoint, api_format)
             } else {
                 (
                     endpoint.to_string(),
@@ -1851,6 +1864,37 @@ fn rewrite_claude_transform_endpoint(
     };
 
     (rewritten, passthrough_query)
+}
+
+/// Rewrite Codex endpoint for API format transforms.
+///
+/// When `api_format` is `"openai_chat"`, rewrite Responses API endpoints to Chat Completions:
+/// - `/responses` → `/chat/completions`
+/// - `/responses/compact` → `/chat/completions`
+fn rewrite_codex_transform_endpoint(
+    endpoint: &str,
+    api_format: &str,
+) -> (String, Option<String>) {
+    let (path, query) = split_endpoint_and_query(endpoint);
+
+    if api_format != "openai_chat" {
+        return (endpoint.to_string(), query.map(ToString::to_string));
+    }
+
+    // Map Responses API endpoints to Chat Completions
+    let target_path = if path.ends_with("/responses") || path.ends_with("/responses/compact") {
+        "/chat/completions"
+    } else {
+        // Don't rewrite non-Responses endpoints
+        return (endpoint.to_string(), query.map(ToString::to_string));
+    };
+
+    let rewritten = match query {
+        Some(q) if !q.is_empty() => format!("{target_path}?{q}"),
+        _ => target_path.to_string(),
+    };
+
+    (rewritten, query.map(ToString::to_string))
 }
 
 fn merge_query_params(base_query: Option<&str>, extra_param: Option<&str>) -> Option<String> {

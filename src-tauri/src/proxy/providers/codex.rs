@@ -1,6 +1,10 @@
 //! Codex (OpenAI) Provider Adapter
 //!
-//! 仅透传模式，支持直连 OpenAI API
+//! 支持透传模式和 API 格式转换模式
+//!
+//! ## API 格式
+//! - **默认** (无 apiFormat): OpenAI Responses API 格式，直接透传
+//! - **openai_chat**: OpenAI Chat Completions 格式，需要 Responses ↔ Chat Completions 转换
 //!
 //! ## 客户端检测
 //! 支持检测官方 Codex 客户端 (codex_vscode, codex_cli_rs)
@@ -9,12 +13,43 @@ use super::{AuthInfo, AuthStrategy, ProviderAdapter};
 use crate::provider::Provider;
 use crate::proxy::error::ProxyError;
 use regex::Regex;
+use serde_json::Value;
 use std::sync::LazyLock;
 
 /// 官方 Codex 客户端 User-Agent 正则
 #[allow(dead_code)]
 static CODEX_CLIENT_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(codex_vscode|codex_cli_rs)/[\d.]+").unwrap());
+
+/// 获取 Codex 供应商的 API 格式
+///
+/// 优先级：meta.apiFormat > 默认透传
+pub fn get_codex_api_format(provider: &Provider) -> &'static str {
+    if let Some(meta) = provider.meta.as_ref() {
+        if let Some(api_format) = meta.api_format.as_deref() {
+            return match api_format {
+                "openai_chat" => "openai_chat",
+                _ => "passthrough",
+            };
+        }
+    }
+    "passthrough"
+}
+
+pub fn codex_api_format_needs_transform(api_format: &str) -> bool {
+    matches!(api_format, "openai_chat")
+}
+
+/// 转换 Codex Responses 请求为 Chat Completions 格式
+pub fn transform_codex_request_for_api_format(
+    body: serde_json::Value,
+    api_format: &str,
+) -> Result<serde_json::Value, ProxyError> {
+    match api_format {
+        "openai_chat" => super::transform_responses_to_chat::responses_to_chat_completions(body),
+        _ => Ok(body),
+    }
+}
 
 /// Codex 适配器
 pub struct CodexAdapter;
@@ -179,6 +214,28 @@ impl ProviderAdapter for CodexAdapter {
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&bearer).unwrap(),
         )]
+    }
+
+    fn needs_transform(&self, provider: &Provider) -> bool {
+        codex_api_format_needs_transform(get_codex_api_format(provider))
+    }
+
+    fn transform_request(
+        &self,
+        body: Value,
+        provider: &Provider,
+    ) -> Result<Value, ProxyError> {
+        transform_codex_request_for_api_format(body, get_codex_api_format(provider))
+    }
+
+    fn transform_response(&self, body: Value) -> Result<Value, ProxyError> {
+        // Heuristic: detect Chat Completions response format by presence of "choices"
+        // and absence of "output" field.
+        if body.get("choices").is_some() && body.get("output").is_none() {
+            super::transform_responses_to_chat::chat_completions_to_responses(body)
+        } else {
+            Ok(body)
+        }
     }
 }
 

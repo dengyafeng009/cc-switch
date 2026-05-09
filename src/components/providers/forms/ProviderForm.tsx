@@ -363,6 +363,15 @@ function ProviderFormFull({
     setLocalApiFormat(format);
   }, []);
 
+  const [codexApiFormat, setCodexApiFormat] = useState<string>(() => {
+    if (appId !== "codex") return "";
+    return initialData?.meta?.apiFormat ?? "";
+  });
+
+  const handleCodexApiFormatChange = useCallback((format: string) => {
+    setCodexApiFormat(format === "passthrough" ? "" : format);
+  }, []);
+
   const handleApiKeyFieldChange = useCallback(
     (field: ClaudeApiKeyField) => {
       const prev = localApiKeyField;
@@ -1209,9 +1218,11 @@ function ProviderFormFull({
           ? pricingConfig.pricingModelSource
           : undefined,
       apiFormat:
-        appId === "claude" && category !== "official"
-          ? localApiFormat
-          : undefined,
+        (() => {
+          if (appId === "claude" && category !== "official") return localApiFormat;
+          if (appId === "codex" && category !== "official" && codexApiFormat) return codexApiFormat as ClaudeApiFormat;
+          return undefined;
+        })(),
       apiKeyField:
         appId === "claude" &&
         category !== "official" &&
@@ -1388,6 +1399,13 @@ function ProviderFormFull({
       const config = preset.config ?? "";
 
       resetCodexConfig(auth, config);
+
+      // Handle apiFormat for Codex presets
+      if (preset.apiFormat) {
+        setCodexApiFormat(preset.apiFormat);
+      } else {
+        setCodexApiFormat("");
+      }
 
       form.reset({
         name: preset.nameKey ? t(preset.nameKey) : preset.name,
@@ -1854,6 +1872,8 @@ function ProviderFormFull({
               modelName={codexModelName}
               onModelNameChange={handleCodexModelNameChange}
               speedTestEndpoints={speedTestEndpoints}
+              apiFormat={codexApiFormat}
+              onApiFormatChange={handleCodexApiFormatChange}
             />
           )}
 

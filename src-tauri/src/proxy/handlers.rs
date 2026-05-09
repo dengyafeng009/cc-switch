@@ -14,10 +14,14 @@ use super::{
     },
     handler_context::RequestContext,
     providers::{
-        get_adapter, get_claude_api_format, streaming::create_anthropic_sse_stream,
+        get_adapter, get_claude_api_format,
+        get_codex_api_format, codex_api_format_needs_transform,
+        streaming::create_anthropic_sse_stream,
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
-        streaming_responses::create_anthropic_sse_stream_from_responses, transform,
-        transform_gemini, transform_responses,
+        streaming_responses::create_anthropic_sse_stream_from_responses,
+        streaming_responses_to_chat::create_responses_sse_stream_from_chat,
+        transform, transform_gemini, transform_responses,
+        transform_responses_to_chat,
     },
     response_processor::{
         create_logged_passthrough_stream, process_response, read_decoded_body,
@@ -435,6 +439,96 @@ fn endpoint_with_query(uri: &axum::http::Uri, endpoint: &str) -> String {
 // Codex API 处理器
 // ============================================================================
 
+/// Process Codex response with optional API format transform.
+///
+/// When the Codex provider has `apiFormat: "openai_chat"`, the upstream returns
+/// Chat Completions format responses which must be converted back to Responses API
+/// format for the Codex Desktop client.
+async fn handle_codex_response(
+    response: super::hyper_client::ProxyResponse,
+    ctx: &RequestContext,
+    state: &ProxyState,
+    _is_stream: bool,
+) -> Result<axum::response::Response, ProxyError> {
+    let api_format = get_codex_api_format(&ctx.provider);
+    if !codex_api_format_needs_transform(api_format) {
+        return process_response(response, ctx, state, &CODEX_PARSER_CONFIG).await;
+    }
+
+    // Transform needed: Chat Completions response → Responses response
+    let status = response.status();
+    // Only use streaming transform when the upstream response is actually SSE,
+    // not just because the client requested streaming (some upstreams return
+    // non-streaming JSON even for stream:true requests).
+    let use_streaming = response.is_sse();
+
+    if use_streaming {
+        let stream = response.bytes_stream();
+        let sse_stream: Box<
+            dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin,
+        > = Box::new(Box::pin(create_responses_sse_stream_from_chat(stream)));
+
+        let timeout_config = ctx.streaming_timeout_config();
+        let logged_stream = create_logged_passthrough_stream(
+            sse_stream,
+            "Codex/Chat",
+            None,
+            timeout_config,
+        );
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "Content-Type",
+            axum::http::HeaderValue::from_static("text/event-stream"),
+        );
+        headers.insert(
+            "Cache-Control",
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
+
+        let body = axum::body::Body::from_stream(logged_stream);
+        Ok((headers, body).into_response())
+    } else {
+        // Non-streaming: read body, transform, return
+        let body_timeout =
+            if ctx.app_config.auto_failover_enabled && ctx.app_config.non_streaming_timeout > 0 {
+                std::time::Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
+            } else {
+                std::time::Duration::ZERO
+            };
+        let (mut response_headers, _status, body_bytes) =
+            read_decoded_body(response, ctx.tag, body_timeout).await?;
+
+        let upstream_response: Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+            log::error!("[Codex] 解析上游 Chat Completions 响应失败: {e}");
+            ProxyError::TransformError(format!(
+                "Failed to parse Chat Completions response: {e}"
+            ))
+        })?;
+
+        let responses_response =
+            transform_responses_to_chat::chat_completions_to_responses(upstream_response)
+                .map_err(|e| {
+                    log::error!("[Codex] 转换响应失败: {e}");
+                    e
+                })?;
+
+        let response_body = serde_json::to_vec(&responses_response).map_err(|e| {
+            ProxyError::TransformError(format!("Failed to serialize Responses response: {e}"))
+        })?;
+
+        strip_entity_headers_for_rebuilt_body(&mut response_headers);
+
+        let mut response = axum::response::Response::new(axum::body::Body::from(response_body));
+        *response.status_mut() = status;
+        *response.headers_mut() = response_headers;
+        response
+            .headers_mut()
+            .insert("Content-Type", axum::http::HeaderValue::from_static("application/json"));
+        Ok(response)
+    }
+}
+
 /// 处理 /v1/chat/completions 请求（OpenAI Chat Completions API - Codex CLI）
 pub async fn handle_chat_completions(
     State(state): State<ProxyState>,
@@ -540,7 +634,7 @@ pub async fn handle_responses(
     ctx.provider = result.provider;
     let response = result.response;
 
-    process_response(response, &ctx, &state, &CODEX_PARSER_CONFIG).await
+    handle_codex_response(response, &ctx, &state, is_stream).await
 }
 
 /// 处理 /v1/responses/compact 请求（OpenAI Responses Compact API - Codex CLI 透传）
@@ -594,7 +688,7 @@ pub async fn handle_responses_compact(
     ctx.provider = result.provider;
     let response = result.response;
 
-    process_response(response, &ctx, &state, &CODEX_PARSER_CONFIG).await
+    handle_codex_response(response, &ctx, &state, is_stream).await
 }
 
 // ============================================================================

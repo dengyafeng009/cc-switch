@@ -24,6 +24,8 @@ export interface CodexProviderPreset {
   // 图标配置
   icon?: string; // 图标名称
   iconColor?: string; // 图标颜色
+  // API 格式覆盖（用于 NewAPI 等只支持 Chat Completions 的供应商）
+  apiFormat?: "openai_chat";
 }
 
 /**

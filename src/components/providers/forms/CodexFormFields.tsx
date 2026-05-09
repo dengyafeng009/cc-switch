@@ -11,6 +11,14 @@ import {
   type FetchedModel,
 } from "@/lib/api/model-fetch";
 import type { ProviderCategory } from "@/types";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { FormLabel } from "@/components/ui/form";
 
 interface EndpointCandidate {
   url: string;
@@ -46,6 +54,10 @@ interface CodexFormFieldsProps {
 
   // Speed Test Endpoints
   speedTestEndpoints: EndpointCandidate[];
+
+  // API Format (for upstream format conversion)
+  apiFormat?: string;
+  onApiFormatChange?: (format: string) => void;
 }
 
 export function CodexFormFields({
@@ -71,6 +83,8 @@ export function CodexFormFields({
   modelName = "",
   onModelNameChange,
   speedTestEndpoints,
+  apiFormat,
+  onApiFormatChange,
 }: CodexFormFieldsProps) {
   const { t } = useTranslation();
 
@@ -187,6 +201,41 @@ export function CodexFormFields({
               : t("providerForm.modelHint", {
                   defaultValue: "💡 留空将使用供应商的默认模型",
                 })}
+          </p>
+        </div>
+      )}
+
+      {/* API Format 选择器 — 用于 NewAPI 等只支持 Chat Completions 的供应商 */}
+      {onApiFormatChange && (
+        <div className="space-y-2">
+          <FormLabel htmlFor="codexApiFormat">
+            {t("providerForm.apiFormat", { defaultValue: "API 格式" })}
+          </FormLabel>
+          <Select
+            value={apiFormat || "passthrough"}
+            onValueChange={onApiFormatChange}
+          >
+            <SelectTrigger id="codexApiFormat" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="passthrough">
+                {t("providerForm.apiFormatResponsesPassthrough", {
+                  defaultValue: "OpenAI Responses (原生透传)",
+                })}
+              </SelectItem>
+              <SelectItem value="openai_chat">
+                {t("providerForm.apiFormatOpenAIChat", {
+                  defaultValue: "OpenAI Chat Completions (需转换)",
+                })}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            {t("providerForm.codexApiFormatHint", {
+              defaultValue:
+                "选择供应商 API 的输入格式。NewAPI等站点请选 Chat Completions",
+            })}
           </p>
         </div>
       )}
